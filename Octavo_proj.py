@@ -160,7 +160,7 @@ def recalculate_accumulated_balances():
 
     # --- Pre-procesamiento y cálculos para df_data_operaciones ---
     # Asegurarse que las columnas de números son numéricas
-    numeric_cols_data = ["Cantidad", "Peso Salida (kg)", "Peso Entrada (kg)", "Precio Unitario ($)", "Monto Deposito", "Total ($)", "Saldo diario", "Saldo Acumulado", "Kilos Restantes", "Libras Restantes", "Promedio"]
+    numeric_cols_data = ["Cantidad", "Peso Salida (kg)", "Peso Entrada (kg)", "Precio Unitario ($)", "Monto Deposito", "Total ($)", "Saldo diario", "Saldo Acumulado", "Kilos Restantes", "Libras Restantes", "Promedio", "Cantidad de gavetas"]
     for col in numeric_cols_data:
         if col in df_data_operaciones.columns:
             df_data_operaciones[col] = pd.to_numeric(df_data_operaciones[col], errors='coerce').fillna(0)
@@ -172,7 +172,7 @@ def recalculate_accumulated_balances():
         df_data_operaciones["Promedio"] = df_data_operaciones.apply(lambda row: row["Libras Restantes"] / row["Cantidad"] if row["Cantidad"] != 0 else 0, axis=1)
         df_data_operaciones["Total ($)"] = df_data_operaciones["Libras Restantes"] * df_data_operaciones["Precio Unitario ($)"]
     else:
-        # Si no hay operaciones, asegurar que estas columnas existen con valores por defecto
+        # Si no hay operaciones, asegurar que estas columnas existen con values por defecto
         for col in ["Kilos Restantes", "Libras Restantes", "Promedio", "Total ($)"]:
             if col not in df_data_operaciones.columns:
                 df_data_operaciones[col] = 0.0
@@ -181,19 +181,24 @@ def recalculate_accumulated_balances():
     # Asegurarse que 'Monto' sea numérico en df_deposits
     if not df_deposits.empty:
         df_deposits["Monto"] = pd.to_numeric(df_deposits["Monto"], errors='coerce').fillna(0)
+        
+        # Agrupar depósitos por Fecha y Empresa
         deposits_summary = df_deposits.groupby(["Fecha", "Empresa"])["Monto"].sum().reset_index()
         deposits_summary.rename(columns={"Monto": "Monto Deposito Calculado"}, inplace=True)
+
+        # Crear una columna temporal 'Empresa_key' en df_data_operaciones para la fusión
+        df_data_operaciones["Empresa_key"] = df_data_operaciones["Proveedor"]
 
         # Fusionar los depósitos calculados con los datos de registro (solo para operaciones)
         df_data_operaciones = pd.merge(
             df_data_operaciones.drop(columns=["Monto Deposito"], errors='ignore'), # Eliminar columna existente para evitar duplicados
             deposits_summary,
-            left_on=["Fecha", "Proveedor"],
+            left_on=["Fecha", "Empresa_key"],
             right_on=["Fecha", "Empresa"],
             how="left"
         )
         df_data_operaciones["Monto Deposito"] = df_data_operaciones["Monto Deposito Calculado"].fillna(0)
-        df_data_operaciones.drop(columns=["Monto Deposito Calculado", "Empresa"], inplace=True, errors='ignore')
+        df_data_operaciones.drop(columns=["Monto Deposito Calculado", "Empresa", "Empresa_key"], inplace=True, errors='ignore')
     else:
         # Si no hay depósitos, el Monto Deposito para todas las operaciones es 0
         df_data_operaciones["Monto Deposito"] = 0.0
@@ -207,10 +212,11 @@ def recalculate_accumulated_balances():
         notes_by_date = df_notes.groupby("Fecha")["Descuento real"].sum().reset_index()
         notes_by_date.rename(columns={"Descuento real": "NotaDebitoAjuste"}, inplace=True)
         
-        # Asegurarse que 'Fecha' es el índice para unir por fecha
-        df_data_operaciones_grouped = df_data_operaciones.groupby("Fecha")["Saldo diario"].sum().reset_index()
+        # Agrupar el saldo diario de operaciones por fecha
+        daily_ops_saldo = df_data_operaciones.groupby("Fecha")["Saldo diario"].sum().reset_index()
 
-        full_daily_balances = pd.merge(df_data_operaciones_grouped, notes_by_date, on="Fecha", how="left")
+        # Fusionar con las notas de débito
+        full_daily_balances = pd.merge(daily_ops_saldo, notes_by_date, on="Fecha", how="left")
         full_daily_balances["NotaDebitoAjuste"] = full_daily_balances["NotaDebitoAjuste"].fillna(0)
         # Las notas de débito reducen el saldo, por eso se restan (o se suman un valor negativo)
         full_daily_balances["SaldoDiarioAjustado"] = full_daily_balances["Saldo diario"] + full_daily_balances["NotaDebitoAjuste"]
@@ -230,6 +236,7 @@ def recalculate_accumulated_balances():
     
     if not df_data_operaciones.empty:
         df_data_operaciones["Saldo diario"] = df_data_operaciones["Fecha"].map(saldo_diario_map).fillna(0)
+        # Aquí asignamos el saldo acumulado del *final del día* a todas las entradas de ese día
         df_data_operaciones["Saldo Acumulado"] = df_data_operaciones["Fecha"].map(saldo_acumulado_map).fillna(INITIAL_ACCUMULATED_BALANCE)
     
     # Consolidar el DataFrame final, incluyendo la fila de BALANCE_INICIAL
@@ -253,39 +260,8 @@ def recalculate_accumulated_balances():
     df_data["N"] = df_data["N"].astype(str)
     df_data = df_data.sort_values(by=["Fecha", "N"], ascending=[True, True]).reset_index(drop=True)
 
-    # El cálculo final del Saldo Acumulado debe ser robusto y secuencial
-    # Iterar sobre el DataFrame ordenado para calcular el Saldo Acumulado
-    saldo_acumulado_final = INITIAL_ACCUMULATED_BALANCE
-    saldo_acumulado_list = []
-    
-    # Mantener un registro de los saldos diarios consolidados por fecha para evitar recalcular
-    # y aplicar el saldo acumulado correctamente a cada fila dentro de la misma fecha
-    daily_adjusted_saldo_map = full_daily_balances.set_index("Fecha")["SaldoDiarioAjustado"].to_dict()
-
-    for i, row in df_data.iterrows():
-        if row["Proveedor"] == "BALANCE_INICIAL":
-            saldo_acumulado_list.append(INITIAL_ACCUMULATED_BALANCE)
-            saldo_acumulado_final = INITIAL_ACCUMULATED_BALANCE
-        else:
-            # Obtener el saldo diario ajustado para la fecha actual
-            saldo_diario_fecha_actual = daily_adjusted_saldo_map.get(row["Fecha"], 0.0)
-
-            # Para cada registro dentro del mismo día, el saldo acumulado debe ser el mismo:
-            # el saldo acumulado hasta el día anterior más el saldo diario total de este día.
-            # Este es un enfoque común para mostrar el "saldo al final del día".
-            # Para lograr esto, necesitamos el saldo acumulado del *día anterior* para cada día.
-            # Reconstruyamos el saldo acumulado de forma más precisa para la visualización.
-            
-            # Si es el primer registro de la fecha o el primer registro general no inicial
-            if i == 0 or row["Fecha"] != df_data.loc[i-1, "Fecha"] or df_data.loc[i-1, "Proveedor"] == "BALANCE_INICIAL":
-                if row["Fecha"] in saldo_acumulado_map:
-                    saldo_acumulado_final = saldo_acumulado_map[row["Fecha"]]
-                else: # Si no hay saldo para esa fecha, lleva el anterior
-                    saldo_acumulado_final = saldo_acumulado_final # Mantiene el saldo anterior si no hay operaciones para la fecha
-            
-            saldo_acumulado_list.append(saldo_acumulado_final)
-
-    df_data["Saldo Acumulado"] = saldo_acumulado_list
+    # El Saldo Acumulado se mapea una vez por fecha, por lo que es constante para una fecha dada.
+    # No se necesita una iteración adicional para el saldo acumulado aquí si ya se mapeó el saldo final del día.
     
     # Finalmente, actualizar st.session_state.data
     st.session_state.data = df_data
@@ -314,7 +290,9 @@ def add_deposit_record(fecha_d, empresa, agencia, monto):
 
     # Generar un 'N' único y secuencial globalmente para depósitos
     if not df_actual.empty:
-        max_n_deposit = df_actual["N"].apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else 0).max()
+        # Filtrar valores no numéricos antes de encontrar el máximo
+        valid_n_deposits = df_actual[df_actual["N"].str.isdigit()]["N"].astype(int)
+        max_n_deposit = valid_n_deposits.max() if not valid_n_deposits.empty else 0
         numero = f"{max_n_deposit + 1:02}"
     else:
         numero = "01" # Primer depósito
@@ -347,11 +325,19 @@ def delete_deposit_record(index_to_delete):
             st.error("Error al eliminar el depósito.")
     except IndexError:
         st.error("Índice de depósito no válido para eliminar.")
+    except KeyError:
+        st.error("El índice de depósito seleccionado ya no existe.")
+
 
 def edit_deposit_record(index_to_edit, updated_data):
     """Edita un registro de depósito por su índice real en el DataFrame."""
     try:
         current_df = st.session_state.df.copy()
+        
+        if index_to_edit not in current_df.index:
+            st.error("El índice de depósito a editar no es válido o ya no existe.")
+            return
+
         for key, value in updated_data.items():
             if key == "Monto":
                 current_df.loc[index_to_edit, key] = float(value)
@@ -362,7 +348,7 @@ def edit_deposit_record(index_to_edit, updated_data):
         
         # Actualizar el tipo de documento si la agencia ha cambiado
         agencia = updated_data.get("Agencia", current_df.loc[index_to_edit, "Agencia"])
-        current_df.loc[index_to_edit, "Documento"] = "Deposito" if "Cajero" in agencia else "Transferencia"
+        current_df.loc[index_to_edit, "Documento"] = "Deposito" if "Cajero" in str(agencia) else "Transferencia"
 
         st.session_state.df = current_df
         if save_dataframe(st.session_state.df, DEPOSITS_FILE):
@@ -372,6 +358,7 @@ def edit_deposit_record(index_to_edit, updated_data):
             st.error("Error al guardar los cambios del depósito.")
     except Exception as e:
         st.error(f"Error al editar el depósito: {e}")
+        st.exception(e)
 
 
 def add_supplier_record(fecha, proveedor, cantidad, peso_salida, peso_entrada, tipo_documento, gavetas, precio_unitario):
@@ -451,6 +438,9 @@ def delete_record(index_to_delete):
             st.error("Error al eliminar el registro.")
     except IndexError:
         st.error("Índice de registro no válido para eliminar.")
+    except KeyError:
+        st.error("El índice de registro seleccionado ya no existe.")
+
 
 def edit_supplier_record(index_to_edit, updated_data):
     """Edita un registro de proveedor por su índice real en el DataFrame."""
@@ -497,6 +487,7 @@ def edit_supplier_record(index_to_edit, updated_data):
             st.error("Error al guardar los cambios del registro.")
     except Exception as e:
         st.error(f"Error al editar el registro: {e}")
+        st.exception(e)
 
 def import_excel_data(archivo_excel):
     """Importa datos desde un archivo Excel y los añade a los registros."""
@@ -608,11 +599,18 @@ def delete_debit_note_record(index_to_delete):
             st.error("Error al eliminar la nota de débito.")
     except IndexError:
         st.error("Índice de nota de débito no válido para eliminar.")
+    except KeyError:
+        st.error("El índice de nota de débito seleccionado ya no existe.")
 
 def edit_debit_note_record(index_to_edit, updated_data):
     """Edita una nota de débito por su índice real en el DataFrame."""
     try:
         current_df = st.session_state.notas.copy()
+
+        if index_to_edit not in current_df.index:
+            st.error("El índice de nota de débito a editar no es válido o ya no existe.")
+            return
+
         for key, value in updated_data.items():
             if key == "Fecha":
                 current_df.loc[index_to_edit, key] = pd.to_datetime(value).date()
@@ -643,6 +641,7 @@ def edit_debit_note_record(index_to_edit, updated_data):
             st.error("Error al guardar los cambios de la nota de débito.")
     except Exception as e:
         st.error(f"Error al editar la nota de débito: {e}")
+        st.exception(e)
 
 # --- 5. FUNCIONES DE INTERFAZ DE USUARIO (UI) ---
 
@@ -674,20 +673,22 @@ def render_delete_deposit_section():
         )
         
         # Usar el índice real del DataFrame para eliminar
-        deposito_seleccionado_info = st.sidebar.selectbox(
-            "Selecciona un depósito a eliminar", 
-            df_display_deposits["Display"], 
-            key="delete_deposit_select"
-        )
-        
-        # Extraer el índice del inicio de la cadena de "Display"
+        # Asegurarse de que el selectbox solo se muestre si hay elementos.
+        if not df_display_deposits["Display"].empty:
+            deposito_seleccionado_info = st.sidebar.selectbox(
+                "Selecciona un depósito a eliminar", 
+                df_display_deposits["Display"], 
+                key="delete_deposit_select"
+            )
+        else:
+            deposito_seleccionado_info = None
+
+        index_to_delete = None
         if deposito_seleccionado_info:
             try:
                 index_to_delete = int(deposito_seleccionado_info.split(' - ')[0])
             except ValueError:
                 index_to_delete = None
-        else:
-            index_to_delete = None
 
         if st.sidebar.button("🗑️ Eliminar depósito seleccionado", key="delete_deposit_button"):
             if index_to_delete is not None:
@@ -710,11 +711,14 @@ def render_edit_deposit_section():
             lambda row: f"{row.name} - {row['Fecha']} - {row['Empresa']} - ${row['Monto']:.2f}", axis=1
         )
         
-        deposito_seleccionado_info = st.sidebar.selectbox(
-            "Selecciona un depósito para editar",
-            df_display_deposits["Display"],
-            key="edit_deposit_select"
-        )
+        if not df_display_deposits["Display"].empty:
+            deposito_seleccionado_info = st.sidebar.selectbox(
+                "Selecciona un depósito para editar",
+                df_display_deposits["Display"],
+                key="edit_deposit_select"
+            )
+        else:
+            deposito_seleccionado_info = None
 
         index_to_edit = None
         if deposito_seleccionado_info:
@@ -728,9 +732,14 @@ def render_edit_deposit_section():
 
             with st.sidebar.form(f"edit_deposit_form_{index_to_edit}", clear_on_submit=False):
                 st.sidebar.write(f"Editando depósito: **ID {index_to_edit}**")
+                
+                # Asegurar que los valores por defecto existan en las listas de opciones
+                default_empresa_idx = PROVEEDORES.index(deposit_to_edit["Empresa"]) if deposit_to_edit["Empresa"] in PROVEEDORES else 0
+                default_agencia_idx = AGENCIAS.index(deposit_to_edit["Agencia"]) if deposit_to_edit["Agencia"] in AGENCIAS else 0
+
                 edited_fecha = st.sidebar.date_input("Fecha", value=deposit_to_edit["Fecha"], key=f"edit_fecha_d_{index_to_edit}")
-                edited_empresa = st.sidebar.selectbox("Empresa (Proveedor)", PROVEEDORES, index=PROVEEDORES.index(deposit_to_edit["Empresa"]) if deposit_to_edit["Empresa"] in PROVEEDORES else 0, key=f"edit_empresa_{index_to_edit}")
-                edited_agencia = st.sidebar.selectbox("Agencia", AGENCIAS, index=AGENCIAS.index(deposit_to_edit["Agencia"]) if deposit_to_edit["Agencia"] in AGENCIAS else 0, key=f"edit_agencia_{index_to_edit}")
+                edited_empresa = st.sidebar.selectbox("Empresa (Proveedor)", PROVEEDORES, index=default_empresa_idx, key=f"edit_empresa_{index_to_edit}")
+                edited_agencia = st.sidebar.selectbox("Agencia", AGENCIAS, index=default_agencia_idx, key=f"edit_agencia_{index_to_edit}")
                 edited_monto = st.sidebar.number_input("Monto ($)", value=float(deposit_to_edit["Monto"]), min_value=0.0, format="%.2f", key=f"edit_monto_{index_to_edit}")
                 
                 submit_edit_deposit = st.sidebar.form_submit_button("💾 Guardar Cambios del Depósito")
@@ -812,11 +821,14 @@ def render_delete_debit_note_section():
             lambda row: f"{row.name} - {row['Fecha']} - Descuento real: ${row['Descuento real']:.2f}", axis=1
         )
         
-        nota_seleccionada_info = st.selectbox(
-            "Selecciona una nota de débito para eliminar", 
-            df_display_notes["Display"], 
-            key="delete_debit_note_select"
-        )
+        if not df_display_notes["Display"].empty:
+            nota_seleccionada_info = st.selectbox(
+                "Selecciona una nota de débito para eliminar", 
+                df_display_notes["Display"], 
+                key="delete_debit_note_select"
+            )
+        else:
+            nota_seleccionada_info = None
 
         index_to_delete = None
         if nota_seleccionada_info:
@@ -845,11 +857,15 @@ def render_edit_debit_note_section():
             lambda row: f"{row.name} - {row['Fecha']} - Descuento real: ${row['Descuento real']:.2f}", axis=1
         )
         
-        nota_seleccionada_info = st.selectbox(
-            "Selecciona una nota de débito para editar",
-            df_display_notes["Display"],
-            key="edit_debit_note_select"
-        )
+        if not df_display_notes["Display"].empty:
+            nota_seleccionada_info = st.selectbox(
+                "Selecciona una nota de débito para editar",
+                df_display_notes["Display"],
+                key="edit_debit_note_select"
+            )
+        else:
+            nota_seleccionada_info = None
+
 
         index_to_edit = None
         if nota_seleccionada_info:
@@ -957,10 +973,10 @@ def display_formatted_dataframe(df_source, title, columns_to_format=None, key_su
                     for col, value in changes.items():
                         # Convertir el valor al tipo de dato original de la columna
                         original_type = df_source[col].dtype
-                        if pd.api.types.is_datetime64_any_dtype(original_type) or isinstance(original_df_to_update.loc[idx, col], (date, datetime)):
+                        if pd.api.types.is_datetime64_any_dtype(original_type) or isinstance(df_source.loc[idx, col], (date, datetime)):
                             try:
                                 original_df_to_update.loc[idx, col] = pd.to_datetime(value).date()
-                            except ValueError:
+                            except (ValueError, TypeError): # Atrapar tanto ValueError como TypeError
                                 st.warning(f"Formato de fecha inválido para la columna '{col}' en la fila {idx}. Se mantendrá el valor anterior.")
                                 original_df_to_update.loc[idx, col] = df_source.loc[idx, col] # Revertir al valor original
                         elif pd.api.types.is_numeric_dtype(original_type):
@@ -969,7 +985,7 @@ def display_formatted_dataframe(df_source, title, columns_to_format=None, key_su
                                     original_df_to_update.loc[idx, col] = int(value)
                                 else:
                                     original_df_to_update.loc[idx, col] = float(value)
-                            except ValueError:
+                            except (ValueError, TypeError): # Atrapar tanto ValueError como TypeError
                                 st.warning(f"Valor numérico inválido para la columna '{col}' en la fila {idx}. Se mantendrá el valor anterior.")
                                 original_df_to_update.loc[idx, col] = df_source.loc[idx, col] # Revertir al valor original
                         else:
@@ -1030,13 +1046,14 @@ def render_tables_and_download():
         st.subheader("🗑️ Eliminar un Registro")
         # Usar el índice real del DataFrame para eliminar
         df_display_data_for_del = st.session_state.data[st.session_state.data["Proveedor"] != "BALANCE_INICIAL"].copy()
-        df_display_data_for_del["Display"] = df_display_data_for_del.apply(
-            lambda row: f"{row.name} - {row['Fecha']} - {row['Proveedor']} - ${row['Total ($)']:.2f}"
-            if pd.notna(row["Total ($)"]) else f"{row.name} - {row['Fecha']} - {row['Proveedor']} - Sin total",
-            axis=1
-        )
-
+        
         if not df_display_data_for_del.empty:
+            df_display_data_for_del["Display"] = df_display_data_for_del.apply(
+                lambda row: f"{row.name} - {row['Fecha']} - {row['Proveedor']} - ${row['Total ($)']:.2f}"
+                if pd.notna(row["Total ($)"]) else f"{row.name} - {row['Fecha']} - {row['Proveedor']} - Sin total",
+                axis=1
+            )
+
             registro_seleccionado_info = st.selectbox(
                 "Selecciona un registro para eliminar", df_display_data_for_del["Display"], key="delete_record_select"
             )
@@ -1116,8 +1133,10 @@ def render_tables_and_download():
             df_data_export = df_data[df_data["Proveedor"] != "BALANCE_INICIAL"].copy()
             
             # Limpiar columnas temporales o de display antes de exportar
-            if "Mostrar" in df_data_export.columns:
-                df_data_export = df_data_export.drop(columns=["Mostrar"])
+            # No es necesario si se maneja bien la creación de la columna "Display" dentro de las funciones
+            # pero como seguridad, podemos verificar si existen.
+            if "Display" in df_data_export.columns:
+                df_data_export = df_data_export.drop(columns=["Display"])
             
             if "Display" in df_deposits.columns:
                 df_deposits = df_deposits.drop(columns=["Display"])
@@ -1177,6 +1196,7 @@ def generate_pdf_report(title, content_elements, filename="reporte.pdf"):
         )
     except Exception as e:
         st.error(f"Error al generar el PDF: {e}")
+        st.exception(e) # Para depuración
 
 def create_table_for_pdf(df, title, columns_to_format=None):
     """Crea un objeto Table de ReportLab a partir de un DataFrame."""
