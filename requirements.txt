@@ -1,0 +1,6 @@
+streamlit
+pandas
+openpyxl
+fpdf
+matplotlib
+reportlab
