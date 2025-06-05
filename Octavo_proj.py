@@ -731,18 +731,18 @@ def render_edit_deposit_section():
             deposit_to_edit = st.session_state.df.loc[index_to_edit].to_dict()
 
             with st.sidebar.form(f"edit_deposit_form_{index_to_edit}", clear_on_submit=False):
-                st.sidebar.write(f"Editando depósito: **ID {index_to_edit}**")
+                st.write(f"Editando depósito: **ID {index_to_edit}**")
                 
                 # Asegurar que los valores por defecto existan en las listas de opciones
                 default_empresa_idx = PROVEEDORES.index(deposit_to_edit["Empresa"]) if deposit_to_edit["Empresa"] in PROVEEDORES else 0
                 default_agencia_idx = AGENCIAS.index(deposit_to_edit["Agencia"]) if deposit_to_edit["Agencia"] in AGENCIAS else 0
 
-                edited_fecha = st.sidebar.date_input("Fecha", value=deposit_to_edit["Fecha"], key=f"edit_fecha_d_{index_to_edit}")
-                edited_empresa = st.sidebar.selectbox("Empresa (Proveedor)", PROVEEDORES, index=default_empresa_idx, key=f"edit_empresa_{index_to_edit}")
-                edited_agencia = st.sidebar.selectbox("Agencia", AGENCIAS, index=default_agencia_idx, key=f"edit_agencia_{index_to_edit}")
-                edited_monto = st.sidebar.number_input("Monto ($)", value=float(deposit_to_edit["Monto"]), min_value=0.0, format="%.2f", key=f"edit_monto_{index_to_edit}")
+                edited_fecha = st.date_input("Fecha", value=deposit_to_edit["Fecha"], key=f"edit_fecha_d_{index_to_edit}")
+                edited_empresa = st.selectbox("Empresa (Proveedor)", PROVEEDORES, index=default_empresa_idx, key=f"edit_empresa_{index_to_edit}")
+                edited_agencia = st.selectbox("Agencia", AGENCIAS, index=default_agencia_idx, key=f"edit_agencia_{index_to_edit}")
+                edited_monto = st.number_input("Monto ($)", value=float(deposit_to_edit["Monto"]), min_value=0.0, format="%.2f", key=f"edit_monto_{index_to_edit}")
                 
-                submit_edit_deposit = st.sidebar.form_submit_button("💾 Guardar Cambios del Depósito")
+                submit_edit_deposit = st.form_submit_button("💾 Guardar Cambios del Depósito")
 
                 if submit_edit_deposit:
                     if edited_monto <= 0:
@@ -1467,3 +1467,4 @@ if st.session_state.deposit_added or st.session_state.deposit_deleted or \
     
     recalculate_accumulated_balances()
     st.rerun()
+
