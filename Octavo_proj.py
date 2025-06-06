@@ -1467,4 +1467,3 @@ if st.session_state.deposit_added or st.session_state.deposit_deleted or \
     
     recalculate_accumulated_balances()
     st.rerun()
-
