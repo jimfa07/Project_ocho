@@ -492,71 +492,152 @@ def edit_supplier_record(index_to_edit, updated_data):
 def import_excel_data(archivo_excel):
     """Importa datos desde un archivo Excel y los añade a los registros."""
     try:
-        df_importado = pd.read_excel(archivo_excel)
-        st.write("Vista previa de los datos importados:", df_importado.head())
+        # Usar pd.ExcelFile para leer múltiples hojas
+        xls = pd.ExcelFile(archivo_excel)
+        sheet_names = xls.sheet_names
+        
+        # --- Hoja 1: Registro de Proveedores ---
+        df_proveedores_importado = pd.DataFrame(columns=COLUMNS_DATA)
+        if "registro de proveedores" in sheet_names: # Reemplaza con el nombre exacto de tu hoja
+            df_proveedores_importado = pd.read_excel(xls, sheet_name="registro de proveedores")
+            st.write("Vista previa de los datos de **Registro de Proveedores** importados:", df_proveedores_importado.head())
 
-        columnas_requeridas = [
-            "Fecha", "Proveedor", "Cantidad",
-            "Peso Salida (kg)", "Peso Entrada (kg)", "Tipo Documento",
-            "Cantidad de gavetas", "Precio Unitario ($)"
-        ]
-        if not all(col in df_importado.columns for col in columnas_requeridas):
-            st.error(f"El archivo Excel debe contener las siguientes columnas: {', '.join(columnas_requeridas)}")
-            return
+            columnas_requeridas_proveedores = [
+                "Fecha", "Proveedor", "Cantidad",
+                "Peso Salida (kg)", "Peso Entrada (kg)", "Tipo Documento",
+                "Cantidad de gavetas", "Precio Unitario ($)"
+            ]
+            if not all(col in df_proveedores_importado.columns for col in columnas_requeridas_proveedores):
+                st.warning(f"La hoja 'registro de proveedores' no contiene todas las columnas requeridas: {', '.join(columnas_requeridas_proveedores)}. Se omitirá esta hoja.")
+                df_proveedores_importado = pd.DataFrame(columns=COLUMNS_DATA) # Resetear para no añadir datos inválidos
+            else:
+                # Preparar datos importados de proveedores
+                df_proveedores_importado["Fecha"] = pd.to_datetime(df_proveedores_importado["Fecha"], errors="coerce").dt.date
+                df_proveedores_importado.dropna(subset=["Fecha"], inplace=True)
 
-        # Solo mostrar el botón de carga si el archivo es válido
+                for col in ["Cantidad", "Peso Salida (kg)", "Peso Entrada (kg)", "Precio Unitario ($)", "Cantidad de gavetas"]:
+                    df_proveedores_importado[col] = pd.to_numeric(df_proveedores_importado[col], errors='coerce').fillna(0)
+                
+                df_proveedores_importado["Kilos Restantes"] = df_proveedores_importado["Peso Salida (kg)"] - df_proveedores_importado["Peso Entrada (kg)"]
+                df_proveedores_importado["Libras Restantes"] = df_proveedores_importado["Kilos Restantes"] * LBS_PER_KG
+                df_proveedores_importado["Promedio"] = df_proveedores_importado.apply(lambda row: row["Libras Restantes"] / row["Cantidad"] if row["Cantidad"] != 0 else 0, axis=1)
+                df_proveedores_importado["Total ($)"] = df_proveedores_importado["Libras Restantes"] * df_proveedores_importado["Precio Unitario ($)"]
+                
+                # Asignar 'N' secuencial
+                current_ops_data = st.session_state.data[st.session_state.data["Proveedor"] != "BALANCE_INICIAL"].copy()
+                max_n_existing_proveedores = 0
+                if not current_ops_data.empty:
+                    max_n_existing_proveedores = current_ops_data["N"].apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else 0).max()
+                
+                new_n_counter_proveedores = max_n_existing_proveedores + 1
+                df_proveedores_importado["N"] = [f"{new_n_counter_proveedores + i:02}" for i in range(len(df_proveedores_importado))]
+                
+                df_proveedores_importado["Monto Deposito"] = 0.0
+                df_proveedores_importado["Saldo diario"] = 0.0
+                df_proveedores_importado["Saldo Acumulado"] = 0.0
+                df_proveedores_importado["Producto"] = PRODUCT_NAME
+                df_proveedores_importado = df_proveedores_importado[COLUMNS_DATA] # Asegurar el orden
+
+        else:
+            st.warning("La hoja 'registro de proveedores' no se encontró en el archivo Excel. Se omitirá esta importación.")
+
+        # --- Hoja 2: Registro de Depósitos ---
+        df_depositos_importado = pd.DataFrame(columns=COLUMNS_DEPOSITS)
+        if "registro de depositos" in sheet_names: # Reemplaza con el nombre exacto de tu hoja
+            df_depositos_importado = pd.read_excel(xls, sheet_name="registro de depositos")
+            st.write("Vista previa de los datos de **Registro de Depósitos** importados:", df_depositos_importado.head())
+
+            columnas_requeridas_depositos = ["Fecha", "Empresa", "Agencia", "Monto"]
+            if not all(col in df_depositos_importado.columns for col in columnas_requeridas_depositos):
+                st.warning(f"La hoja 'registro de depositos' no contiene todas las columnas requeridas: {', '.join(columnas_requeridas_depositos)}. Se omitirá esta hoja.")
+                df_depositos_importado = pd.DataFrame(columns=COLUMNS_DEPOSITS)
+            else:
+                df_depositos_importado["Fecha"] = pd.to_datetime(df_depositos_importado["Fecha"], errors="coerce").dt.date
+                df_depositos_importado.dropna(subset=["Fecha"], inplace=True)
+                df_depositos_importado["Monto"] = pd.to_numeric(df_depositos_importado["Monto"], errors='coerce').fillna(0)
+                
+                # Asignar 'N' y 'Documento' para depósitos importados
+                current_deposits_data = st.session_state.df.copy()
+                max_n_existing_deposits = 0
+                if not current_deposits_data.empty:
+                    valid_n_deposits = current_deposits_data[current_deposits_data["N"].str.isdigit()]["N"].astype(int)
+                    max_n_existing_deposits = valid_n_deposits.max() if not valid_n_deposits.empty else 0
+                
+                new_n_counter_deposits = max_n_existing_deposits + 1
+                df_depositos_importado["N"] = [f"{new_n_counter_deposits + i:02}" for i in range(len(df_depositos_importado))]
+                df_depositos_importado["Documento"] = df_depositos_importado["Agencia"].apply(lambda x: "Deposito" if "Cajero" in str(x) else "Transferencia")
+                df_depositos_importado = df_depositos_importado[COLUMNS_DEPOSITS] # Asegurar el orden
+        else:
+            st.warning("La hoja 'registro de depositos' no se encontró en el archivo Excel. Se omitirá esta importación.")
+
+        # --- Hoja 3: Registro de Notas de Debito ---
+        df_notas_debito_importado = pd.DataFrame(columns=COLUMNS_DEBIT_NOTES)
+        if "registro de notas de debito" in sheet_names: # Reemplaza con el nombre exacto de tu hoja
+            df_notas_debito_importado = pd.read_excel(xls, sheet_name="registro de notas de debito")
+            st.write("Vista previa de los datos de **Registro de Notas de Debito** importados:", df_notas_debito_importado.head())
+
+            columnas_requeridas_notas = ["Fecha", "Descuento", "Descuento real"]
+            if not all(col in df_notas_debito_importado.columns for col in columnas_requeridas_notas):
+                st.warning(f"La hoja 'registro de notas de debito' no contiene todas las columnas requeridas: {', '.join(columnas_requeridas_notas)}. Se omitirá esta hoja.")
+                df_notas_debito_importado = pd.DataFrame(columns=COLUMNS_DEBIT_NOTES)
+            else:
+                df_notas_debito_importado["Fecha"] = pd.to_datetime(df_notas_debito_importado["Fecha"], errors="coerce").dt.date
+                df_notas_debito_importado.dropna(subset=["Fecha"], inplace=True)
+                df_notas_debito_importado["Descuento"] = pd.to_numeric(df_notas_debito_importado["Descuento"], errors='coerce').fillna(0)
+                df_notas_debito_importado["Descuento real"] = pd.to_numeric(df_notas_debito_importado["Descuento real"], errors='coerce').fillna(0)
+
+                # Recalcular "Libras calculadas" y "Descuento posible" para las notas importadas
+                if not df_notas_debito_importado.empty and not st.session_state.data.empty:
+                    df_data_for_calc_notes = st.session_state.data.copy()
+                    df_data_for_calc_notes["Libras Restantes"] = pd.to_numeric(df_data_for_calc_notes["Libras Restantes"], errors='coerce').fillna(0)
+                    
+                    df_notas_debito_importado["Libras calculadas"] = df_notas_debito_importado["Fecha"].apply(
+                        lambda f: df_data_for_calc_notes[
+                            (df_data_for_calc_notes["Fecha"] == f) & 
+                            (df_data_for_calc_notes["Proveedor"] != "BALANCE_INICIAL")
+                        ]["Libras Restantes"].sum()
+                    )
+                    df_notas_debito_importado["Descuento posible"] = df_notas_debito_importado["Libras calculadas"] * df_notas_debito_importado["Descuento"]
+                else:
+                     df_notas_debito_importado["Libras calculadas"] = 0.0
+                     df_notas_debito_importado["Descuento posible"] = 0.0
+                
+                df_notas_debito_importado = df_notas_debito_importado[COLUMNS_DEBIT_NOTES] # Asegurar el orden
+
+        else:
+            st.warning("La hoja 'registro de notas de debito' no se encontró en el archivo Excel. Se omitirá esta importación.")
+
         if st.button("Cargar datos a registros desde Excel"):
-            # Preparar datos importados
-            df_importado["Fecha"] = pd.to_datetime(df_importado["Fecha"], errors="coerce").dt.date
-            df_importado.dropna(subset=["Fecha"], inplace=True)
-
-            # Asegurarse que las columnas numéricas son de tipo numérico
-            for col in ["Cantidad", "Peso Salida (kg)", "Peso Entrada (kg)", "Precio Unitario ($)", "Cantidad de gavetas"]:
-                df_importado[col] = pd.to_numeric(df_importado[col], errors='coerce').fillna(0)
-            
-            # Recalcular columnas derivadas para los datos importados
-            df_importado["Kilos Restantes"] = df_importado["Peso Salida (kg)"] - df_importado["Peso Entrada (kg)"]
-            df_importado["Libras Restantes"] = df_importado["Kilos Restantes"] * LBS_PER_KG
-            df_importado["Promedio"] = df_importado.apply(lambda row: row["Libras Restantes"] / row["Cantidad"] if row["Cantidad"] != 0 else 0, axis=1)
-            df_importado["Total ($)"] = df_importado["Libras Restantes"] * df_importado["Precio Unitario ($)"]
-
-            # Asignar el número 'N' a cada fila importada de manera secuencial
-            current_ops_data = st.session_state.data[st.session_state.data["Proveedor"] != "BALANCE_INICIAL"].copy()
-            max_n_existing = 0
-            if not current_ops_data.empty:
-                max_n_existing = current_ops_data["N"].apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else 0).max()
-            
-            new_n_counter = max_n_existing + 1
-            
-            df_importado["N"] = [f"{new_n_counter + i:02}" for i in range(len(df_importado))]
-            
-            # Limpiar columnas de saldo antes de la concatenación para que `recalculate_accumulated_balances` las recalcule
-            df_importado["Monto Deposito"] = 0.0
-            df_importado["Saldo diario"] = 0.0
-            df_importado["Saldo Acumulado"] = 0.0
-            df_importado["Producto"] = PRODUCT_NAME # Asegurarse que el producto sea 'Pollo'
-
-            # Concatenar el DataFrame importado al estado de sesión
-            df_to_add = df_importado[COLUMNS_DATA] # Asegurarse de que el orden de las columnas sea el mismo
-
-            # Separate the initial balance row
-            df_balance = st.session_state.data[st.session_state.data["Proveedor"] == "BALANCE_INICIAL"].copy()
-            df_temp = st.session_state.data[st.session_state.data["Proveedor"] != "BALANCE_INICIAL"].copy()
-
-            df_temp = pd.concat([df_temp, df_to_add], ignore_index=True)
-            df_temp.reset_index(drop=True, inplace=True) # Reset index after concat
-            
-            st.session_state.data = pd.concat([df_balance, df_temp], ignore_index=True)
-
-            if save_dataframe(st.session_state.data, DATA_FILE):
+            # Concatenar el DataFrame importado de proveedores
+            if not df_proveedores_importado.empty:
+                df_balance = st.session_state.data[st.session_state.data["Proveedor"] == "BALANCE_INICIAL"].copy()
+                df_temp = st.session_state.data[st.session_state.data["Proveedor"] != "BALANCE_INICIAL"].copy()
+                st.session_state.data = pd.concat([df_balance, df_temp, df_proveedores_importado], ignore_index=True)
+                st.session_state.data.reset_index(drop=True, inplace=True)
+                save_dataframe(st.session_state.data, DATA_FILE)
                 st.session_state.data_imported = True
+            
+            # Concatenar el DataFrame importado de depósitos
+            if not df_depositos_importado.empty:
+                st.session_state.df = pd.concat([st.session_state.df, df_depositos_importado], ignore_index=True)
+                st.session_state.df["N"] = st.session_state.df["N"].astype(str) # Asegurar que 'N' sea string
+                save_dataframe(st.session_state.df, DEPOSITS_FILE)
+                st.session_state.data_imported = True
+
+            # Concatenar el DataFrame importado de notas de débito
+            if not df_notas_debito_importado.empty:
+                st.session_state.notas = pd.concat([st.session_state.notas, df_notas_debito_importado], ignore_index=True)
+                save_dataframe(st.session_state.notas, DEBIT_NOTES_FILE)
+                st.session_state.data_imported = True
+
+            if st.session_state.data_imported:
                 st.success("Datos importados correctamente. Recalculando saldos...")
             else:
-                st.error("Error al guardar los datos importados.")
+                st.info("No se importaron datos válidos de ninguna hoja.")
 
     except Exception as e:
         st.error(f"Error al cargar o procesar el archivo Excel: {e}")
-        st.exception(e) # Mostrar el stack trace completo para depuración
+        st.exception(e)
 
 
 def add_debit_note(fecha_nota, descuento, descuento_real):
@@ -764,7 +845,11 @@ def render_edit_deposit_section():
 def render_import_excel_section():
     """Renderiza la sección para importar datos desde Excel."""
     st.subheader("📁 Importar datos desde Excel")
-    st.info("Asegúrate de que tu archivo Excel tenga las siguientes columnas (exactamente con estos nombres): Fecha, Proveedor, Cantidad, Peso Salida (kg), Peso Entrada (kg), Tipo Documento, Cantidad de gavetas, Precio Unitario ($).")
+    st.info("Asegúrate de que tu archivo Excel tenga las siguientes hojas y columnas (con nombres exactos):")
+    st.markdown("- **Hoja 1 (registro de proveedores):** `Fecha`, `Proveedor`, `Cantidad`, `Peso Salida (kg)`, `Peso Entrada (kg)`, `Tipo Documento`, `Cantidad de gavetas`, `Precio Unitario ($)`")
+    st.markdown("- **Hoja 2 (registro de depositos):** `Fecha`, `Empresa`, `Agencia`, `Monto`")
+    st.markdown("- **Hoja 3 (registro de notas de debito):** `Fecha`, `Descuento`, `Descuento real`")
+    
     archivo_excel = st.file_uploader("Sube tu archivo Excel (.xlsx)", type=["xlsx"], key="excel_uploader")
     if archivo_excel is not None:
         import_excel_data(archivo_excel)
