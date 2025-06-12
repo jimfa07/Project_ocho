@@ -17,7 +17,7 @@ DATA_FILE = "registro_data.pkl"
 DEPOSITS_FILE = "registro_depositos.pkl"
 DEBIT_NOTES_FILE = "registro_notas_debito.pkl"
 
-INITIAL_ACCUMULATED_BALANCE = -243.30
+INITIAL_ACCUMULATED_BALANCE = 44.64 # Valor cambiado de -243.30 a 44.64
 PRODUCT_NAME = "Pollo"
 LBS_PER_KG = 2.20462
 
@@ -731,7 +731,7 @@ def render_deposit_registration_form():
     st.sidebar.header("📝 Registro de Depósitos")
     with st.sidebar.form("registro_deposito_form", clear_on_submit=True):
         fecha_d = st.date_input("Fecha del registro", value=datetime.today().date(), key="fecha_d_input_sidebar")
-        empresa = st.selectbox("Empresa (Proveedor)", PROVEEDORES, key="empresa_select_sidebar")
+        empresa = st.selectbox("Empresa (Proveedor)", PROVEVEDORES, key="empresa_select_sidebar")
         agencia = st.selectbox("Agencia", AGENCIAS, key="agencia_select_sidebar")
         monto = st.number_input("Monto ($)", min_value=0.0, format="%.2f", key="monto_input_sidebar")
         submit_d = st.form_submit_button("➕ Agregar Depósito")
@@ -1229,9 +1229,9 @@ def render_tables_and_download():
             if "Display" in df_notes.columns:
                 df_notes = df_notes.drop(columns=["Display"])
 
-            df_data_export.to_excel(writer, sheet_name="Registros", index=False)
-            df_deposits.to_excel(writer, sheet_name="Depositos", index=False)
-            df_notes.to_excel(writer, sheet_name="Notas de Debito", index=False)
+            df_data_export.to_excel(writer, sheet_name="registro de proveedores", index=False)
+            df_deposits.to_excel(writer, sheet_name="registro de depositos", index=False)
+            df_notes.to_excel(writer, sheet_name="registro de notas de debito", index=False)
         output.seek(0)
         return output
 
