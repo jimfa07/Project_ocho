@@ -731,7 +731,7 @@ def render_deposit_registration_form():
     st.sidebar.header("📝 Registro de Depósitos")
     with st.sidebar.form("registro_deposito_form", clear_on_submit=True):
         fecha_d = st.date_input("Fecha del registro", value=datetime.today().date(), key="fecha_d_input_sidebar")
-        empresa = st.selectbox("Empresa (Proveedor)", PROVEVEDORES, key="empresa_select_sidebar")
+        empresa = st.selectbox("Empresa (Proveedor)", PROVEEDORES, key="empresa_select_sidebar")
         agencia = st.selectbox("Agencia", AGENCIAS, key="agencia_select_sidebar")
         monto = st.number_input("Monto ($)", min_value=0.0, format="%.2f", key="monto_input_sidebar")
         submit_d = st.form_submit_button("➕ Agregar Depósito")
