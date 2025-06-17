@@ -17,7 +17,7 @@ DATA_FILE = "registro_data.pkl"
 DEPOSITS_FILE = "registro_depositos.pkl"
 DEBIT_NOTES_FILE = "registro_notas_debito.pkl"
 
-INITIAL_ACCUMULATED_BALANCE = 176.00 # Valor cambiado de -243.30 a 44.64
+INITIAL_ACCUMULATED_BALANCE = 176.01 # Valor cambiado de 170.30 a 176.01
 PRODUCT_NAME = "Pollo"
 LBS_PER_KG = 2.20462
 
