@@ -4,5 +4,5 @@ openpyxl
 fpdf
 matplotlib
 reportlab
-superbase
+supabase
 st-supabase-connection
