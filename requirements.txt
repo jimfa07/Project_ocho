@@ -4,3 +4,4 @@ openpyxl
 fpdf
 matplotlib
 reportlab
+superbase
