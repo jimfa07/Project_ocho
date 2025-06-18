@@ -27,7 +27,7 @@ AGENCIAS = [
     "Banco Bolivariano"
 ]
 
-# Columnas esperadas para los DataFrames (coinciden con las tablas en Supabase)
+# Columnas esperadas para los DataFrames
 COLUMNS_DATA = [
     "N", "Fecha", "Proveedor", "Producto", "Cantidad",
     "Peso Salida (kg)", "Peso Entrada (kg)", "Tipo Documento",
@@ -41,10 +41,9 @@ COLUMNS_DEBIT_NOTES = ["Fecha", "Libras calculadas", "Descuento", "Descuento pos
 # Configuración de la página de Streamlit
 st.set_page_config(page_title="Sistema de Gestión de Proveedores - Producto Pollo", layout="wide", initial_sidebar_state="expanded")
 
-# --- 2. FUNCIONES DE CARGA Y GUARDADO DE DATOS CON SUPABASE ---
-@st.cache_resource
-def init_supabase():
-    """Inicializa la conexión con Supabase."""
+# --- 2. FUNCIONES DE CONEXIÓN A SUPABASE ---
+def init_supabase() -> SupabaseConnection:
+    """Inicializa la conexión a Supabase."""
     try:
         conn = st.connection("supabase", type=SupabaseConnection)
         return conn
@@ -52,58 +51,45 @@ def init_supabase():
         st.error(f"Error al conectar con Supabase: {e}")
         return None
 
-def load_dataframe(table_name, default_columns, date_columns=None):
+def load_dataframe_from_supabase(conn: SupabaseConnection, table_name: str, default_columns: list, date_columns: list = None) -> pd.DataFrame:
     """Carga un DataFrame desde una tabla de Supabase."""
-    conn = st.session_state.conn
-    if not conn:
-        st.error("No se pudo establecer la conexión con Supabase.")
-        return pd.DataFrame(columns=default_columns)
-
     try:
         response = conn.table(table_name).select("*").execute()
         df = pd.DataFrame(response.data)
-        
         if df.empty:
             return pd.DataFrame(columns=default_columns)
         
-        # Convertir columnas de fecha
+        # Convertir fechas a datetime.date
         if date_columns:
             for col in date_columns:
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
         
-        # Asegurar que todas las columnas por defecto existen
+        # Asegurar que todas las columnas existan
         for col in default_columns:
             if col not in df.columns:
                 df[col] = None
-        
         return df[default_columns]
     except Exception as e:
         st.error(f"Error al cargar datos de {table_name}: {e}")
         return pd.DataFrame(columns=default_columns)
 
-def save_dataframe(df, table_name):
+def save_dataframe_to_supabase(conn: SupabaseConnection, table_name: str, df: pd.DataFrame) -> bool:
     """Guarda un DataFrame en una tabla de Supabase."""
-    conn = st.session_state.conn
-    if not conn:
-        st.error("No se pudo establecer la conexión con Supabase.")
-        return False
-
     try:
+        # Limpiar la tabla existente
+        conn.table(table_name).delete().neq("id", -1).execute()  # Borrar todo (neq es para evitar error si la tabla está vacía)
+        
         # Convertir DataFrame a lista de diccionarios
-        data_list = df.to_dict("records")
-        
-        # Limpiar datos para evitar errores (por ejemplo, convertir fechas a string)
-        for data in data_list:
-            for key, value in data.items():
+        data = df.to_dict("records")
+        for record in data:
+            # Convertir fechas a string ISO para Supabase
+            for key, value in record.items():
                 if isinstance(value, (date, datetime)):
-                    data[key] = value.strftime("%Y-%m-%d")
+                    record[key] = value.strftime("%Y-%m-%d")
                 elif pd.isna(value):
-                    data[key] = None
-        
-        # Eliminar todos los registros existentes y reemplazar con los nuevos
-        conn.table(table_name).delete().neq("id", -1).execute()  # Eliminar todo (neq evita error si tabla vacía)
-        conn.table(table_name).insert(data_list).execute()
+                    record[key] = None
+            conn.table(table_name).insert(record).execute()
         return True
     except Exception as e:
         st.error(f"Error al guardar datos en {table_name}: {e}")
@@ -111,14 +97,14 @@ def save_dataframe(df, table_name):
 
 # --- 3. FUNCIONES DE INICIALIZACIÓN DEL ESTADO ---
 def initialize_session_state():
-    """Inicializa la conexión y los DataFrames en st.session_state."""
+    """Inicializa los DataFrames en st.session_state desde Supabase."""
     if "conn" not in st.session_state:
         st.session_state.conn = init_supabase()
     
     if "data" not in st.session_state:
-        st.session_state.data = load_dataframe("proveedores", COLUMNS_DATA, ["Fecha"])
+        st.session_state.data = load_dataframe_from_supabase(st.session_state.conn, "proveedores", COLUMNS_DATA, ["Fecha"])
         
-        # Asegurar que la fila de balance inicial exista
+        # Asegurar que la fila de BALANCE_INICIAL exista
         initial_balance_row_exists = any(st.session_state.data["Proveedor"] == "BALANCE_INICIAL")
         if not initial_balance_row_exists:
             fila_inicial_saldo = {col: None for col in COLUMNS_DATA}
@@ -129,23 +115,29 @@ def initialize_session_state():
             fila_inicial_saldo["Monto Deposito"] = 0.0
             fila_inicial_saldo["Total ($)"] = 0.0
             fila_inicial_saldo["N"] = "00"
-            
             st.session_state.data = pd.concat([pd.DataFrame([fila_inicial_saldo]), st.session_state.data], ignore_index=True)
-            save_dataframe(st.session_state.data, "proveedores")
+        else:
+            idx = st.session_state.data[st.session_state.data["Proveedor"] == "BALANCE_INICIAL"].index[0]
+            st.session_state.data.loc[idx, "Saldo Acumulado"] = INITIAL_ACCUMULATED_BALANCE
+            st.session_state.data.loc[idx, "Saldo diario"] = 0.0
+            st.session_state.data.loc[idx, "Monto Deposito"] = 0.0
+            st.session_state.data.loc[idx, "Total ($)"] = 0.0
+            st.session_state.data.loc[idx, "N"] = "00"
+            st.session_state.data.loc[idx, "Fecha"] = datetime(1900, 1, 1).date()
     
     if "df" not in st.session_state:
-        st.session_state.df = load_dataframe("depositos", COLUMNS_DEPOSITS, ["Fecha"])
+        st.session_state.df = load_dataframe_from_supabase(st.session_state.conn, "depositos", COLUMNS_DEPOSITS, ["Fecha"])
         st.session_state.df["N"] = st.session_state.df["N"].astype(str)
     
     if "notas" not in st.session_state:
-        st.session_state.notas = load_dataframe("notas_debito", COLUMNS_DEBIT_NOTES, ["Fecha"])
+        st.session_state.notas = load_dataframe_from_supabase(st.session_state.conn, "notas_debito", COLUMNS_DEBIT_NOTES, ["Fecha"])
     
+    # Recalcular saldos
     recalculate_accumulated_balances()
     
     # Inicializar flags
-    for flag in ["deposit_added", "deposit_deleted", "record_added", "record_deleted", 
-                 "data_imported", "debit_note_added", "debit_note_deleted", 
-                 "record_edited", "deposit_edited", "debit_note_edited"]:
+    for flag in ["deposit_added", "deposit_deleted", "record_added", "record_deleted", "data_imported",
+                 "debit_note_added", "debit_note_deleted", "record_edited", "deposit_edited", "debit_note_edited"]:
         if flag not in st.session_state:
             st.session_state[flag] = False
 
@@ -156,16 +148,17 @@ def recalculate_accumulated_balances():
     df_deposits = st.session_state.df.copy()
     df_notes = st.session_state.notas.copy()
 
+    # Convertir fechas
     for df_temp in [df_data, df_deposits, df_notes]:
         if "Fecha" in df_temp.columns:
             df_temp["Fecha"] = pd.to_datetime(df_temp["Fecha"], errors="coerce").dt.date
 
+    # Separar BALANCE_INICIAL
     df_initial_balance = df_data[df_data["Proveedor"] == "BALANCE_INICIAL"].copy()
     df_data_operaciones = df_data[df_data["Proveedor"] != "BALANCE_INICIAL"].copy()
 
-    numeric_cols_data = ["Cantidad", "Peso Salida (kg)", "Peso Entrada (kg)", "Precio Unitario ($)", 
-                        "Monto Deposito", "Total ($)", "Saldo diario", "Saldo Acumulado", 
-                        "Kilos Restantes", "Libras Restantes", "Promedio", "Cantidad de gavetas"]
+    # Calcular columnas derivadas
+    numeric_cols_data = ["Cantidad", "Peso Salida (kg)", "Peso Entrada (kg)", "Precio Unitario ($)", "Monto Deposito", "Total ($)", "Saldo diario", "Saldo Acumulado", "Kilos Restantes", "Libras Restantes", "Promedio", "Cantidad de gavetas"]
     for col in numeric_cols_data:
         if col in df_data_operaciones.columns:
             df_data_operaciones[col] = pd.to_numeric(df_data_operaciones[col], errors='coerce').fillna(0)
@@ -180,6 +173,7 @@ def recalculate_accumulated_balances():
             if col not in df_data_operaciones.columns:
                 df_data_operaciones[col] = 0.0
 
+    # Calcular Monto Deposito
     if not df_deposits.empty:
         df_deposits["Monto"] = pd.to_numeric(df_deposits["Monto"], errors='coerce').fillna(0)
         deposits_summary = df_deposits.groupby(["Fecha", "Empresa"])["Monto"].sum().reset_index()
@@ -198,8 +192,10 @@ def recalculate_accumulated_balances():
     else:
         df_data_operaciones["Monto Deposito"] = 0.0
 
+    # Calcular Saldo diario
     df_data_operaciones["Saldo diario"] = df_data_operaciones["Monto Deposito"] - df_data_operaciones["Total ($)"]
 
+    # Incorporar notas de débito
     if not df_notes.empty:
         df_notes["Descuento real"] = pd.to_numeric(df_notes["Descuento real"], errors='coerce').fillna(0)
         notes_by_date = df_notes.groupby("Fecha")["Descuento real"].sum().reset_index()
@@ -223,6 +219,7 @@ def recalculate_accumulated_balances():
         df_data_operaciones["Saldo diario"] = df_data_operaciones["Fecha"].map(saldo_diario_map).fillna(0)
         df_data_operaciones["Saldo Acumulado"] = df_data_operaciones["Fecha"].map(saldo_acumulado_map).fillna(INITIAL_ACCUMULATED_BALANCE)
     
+    # Consolidar DataFrame final
     if not df_initial_balance.empty:
         df_initial_balance.loc[:, "Saldo Acumulado"] = INITIAL_ACCUMULATED_BALANCE
         df_initial_balance.loc[:, "Saldo diario"] = 0.0
@@ -230,7 +227,6 @@ def recalculate_accumulated_balances():
         df_initial_balance.loc[:, "Total ($)"] = 0.0
         df_initial_balance.loc[:, "N"] = "00"
         df_initial_balance.loc[:, "Fecha"] = datetime(1900, 1, 1).date()
-        
         df_data = pd.concat([df_initial_balance, df_data_operaciones], ignore_index=True)
     else:
         df_data = df_data_operaciones
@@ -240,7 +236,7 @@ def recalculate_accumulated_balances():
     df_data = df_data.sort_values(by=["Fecha", "N"], ascending=[True, True]).reset_index(drop=True)
     
     st.session_state.data = df_data
-    save_dataframe(st.session_state.data, "proveedores")
+    save_dataframe_to_supabase(st.session_state.conn, "proveedores", st.session_state.data)
 
 def get_next_n(df, current_date):
     """Genera el siguiente número 'N' para un registro."""
@@ -249,8 +245,7 @@ def get_next_n(df, current_date):
         df_filtered["N_numeric"] = pd.to_numeric(df_filtered["N"], errors='coerce').fillna(0)
         max_n_global = df_filtered["N_numeric"].max()
         return f"{int(max_n_global) + 1:02}"
-    else:
-        return "01"
+    return "01"
 
 def add_deposit_record(fecha_d, empresa, agencia, monto):
     """Agrega un nuevo registro de depósito."""
@@ -275,7 +270,7 @@ def add_deposit_record(fecha_d, empresa, agencia, monto):
         "N": numero
     }
     st.session_state.df = pd.concat([df_actual, pd.DataFrame([nuevo_registro])], ignore_index=True)
-    if save_dataframe(st.session_state.df, "depositos"):
+    if save_dataframe_to_supabase(st.session_state.conn, "depositos", st.session_state.df):
         st.session_state.deposit_added = True
         st.success("Depósito agregado exitosamente. Recalculando saldos...")
     else:
@@ -285,20 +280,20 @@ def delete_deposit_record(index_to_delete):
     """Elimina un registro de depósito."""
     try:
         st.session_state.df = st.session_state.df.drop(index=index_to_delete).reset_index(drop=True)
-        if save_dataframe(st.session_state.df, "depositos"):
+        if save_dataframe_to_supabase(st.session_state.conn, "depositos", st.session_state.df):
             st.session_state.deposit_deleted = True
             st.success("Depósito eliminado correctamente. Recalculando saldos...")
         else:
             st.error("Error al eliminar el depósito.")
-    except Exception as e:
-        st.error(f"Error al eliminar el depósito: {e}")
+    except (IndexError, KeyError):
+        st.error("Índice de depósito no válido para eliminar.")
 
 def edit_deposit_record(index_to_edit, updated_data):
     """Edita un registro de depósito."""
     try:
         current_df = st.session_state.df.copy()
         if index_to_edit not in current_df.index:
-            st.error("El índice de depósito no es válido.")
+            st.error("El índice de depósito a editar no es válido.")
             return
 
         for key, value in updated_data.items():
@@ -312,7 +307,7 @@ def edit_deposit_record(index_to_edit, updated_data):
         current_df.loc[index_to_edit, "Documento"] = "Deposito" if "Cajero" in str(updated_data.get("Agencia", current_df.loc[index_to_edit, "Agencia"])) else "Transferencia"
 
         st.session_state.df = current_df
-        if save_dataframe(st.session_state.df, "depositos"):
+        if save_dataframe_to_supabase(st.session_state.conn, "depositos", st.session_state.df):
             st.session_state.deposit_edited = True
             st.success("Depósito editado exitosamente. Recalculando saldos...")
         else:
@@ -366,7 +361,7 @@ def add_supplier_record(fecha, proveedor, cantidad, peso_salida, peso_entrada, t
     df_temp = pd.concat([df_temp, pd.DataFrame([nueva_fila])], ignore_index=True)
     st.session_state.data = pd.concat([df_balance, df_temp], ignore_index=True)
     
-    if save_dataframe(st.session_state.data, "proveedores"):
+    if save_dataframe_to_supabase(st.session_state.conn, "proveedores", st.session_state.data):
         st.session_state.record_added = True
         st.success("Registro agregado correctamente. Recalculando saldos...")
         return True
@@ -381,13 +376,13 @@ def delete_record(index_to_delete):
             st.error("No se puede eliminar la fila de BALANCE_INICIAL.")
             return
         st.session_state.data = st.session_state.data.drop(index=index_to_delete).reset_index(drop=True)
-        if save_dataframe(st.session_state.data, "proveedores"):
+        if save_dataframe_to_supabase(st.session_state.conn, "proveedores", st.session_state.data):
             st.session_state.record_deleted = True
             st.success("Registro eliminado correctamente. Recalculando saldos...")
         else:
             st.error("Error al eliminar el registro.")
-    except Exception as e:
-        st.error(f"Error al eliminar el registro: {e}")
+    except (IndexError, KeyError):
+        st.error("Índice de registro no válido para eliminar.")
 
 def edit_supplier_record(index_to_edit, updated_data):
     """Edita un registro de proveedor."""
@@ -423,7 +418,7 @@ def edit_supplier_record(index_to_edit, updated_data):
         current_df.loc[index_to_edit, "Total ($)"] = total
 
         st.session_state.data = current_df
-        if save_dataframe(st.session_state.data, "proveedores"):
+        if save_dataframe_to_supabase(st.session_state.conn, "proveedores", st.session_state.data):
             st.session_state.record_edited = True
             st.success("Registro editado exitosamente. Recalculando saldos...")
         else:
@@ -518,6 +513,7 @@ def import_excel_data(archivo_excel):
                 if not df_notas_debito_importado.empty and not st.session_state.data.empty:
                     df_data_for_calc_notes = st.session_state.data.copy()
                     df_data_for_calc_notes["Libras Restantes"] = pd.to_numeric(df_data_for_calc_notes["Libras Restantes"], errors='coerce').fillna(0)
+                    
                     df_notas_debito_importado["Libras calculadas"] = df_notas_debito_importado["Fecha"].apply(
                         lambda f: df_data_for_calc_notes[
                             (df_data_for_calc_notes["Fecha"] == f) & 
@@ -531,40 +527,32 @@ def import_excel_data(archivo_excel):
                 
                 df_notas_debito_importado = df_notas_debito_importado[COLUMNS_DEBIT_NOTES]
 
-        if st.button("Cargar datos a registros desde Excel"):
+        if st.button("Cargar datos a Supabase desde Excel"):
             if not df_proveedores_importado.empty:
                 df_balance = st.session_state.data[st.session_state.data["Proveedor"] == "BALANCE_INICIAL"].copy()
                 df_temp = st.session_state.data[st.session_state.data["Proveedor"] != "BALANCE_INICIAL"].copy()
                 st.session_state.data = pd.concat([df_balance, df_temp, df_proveedores_importado], ignore_index=True)
-                if save_dataframe(st.session_state.data, "proveedores"):
+                if save_dataframe_to_supabase(st.session_state.conn, "proveedores", st.session_state.data):
                     st.session_state.data_imported = True
-                else:
-                    st.error("Error al guardar proveedores en Supabase.")
             
             if not df_depositos_importado.empty:
                 st.session_state.df = pd.concat([st.session_state.df, df_depositos_importado], ignore_index=True)
                 st.session_state.df["N"] = st.session_state.df["N"].astype(str)
-                if save_dataframe(st.session_state.df, "depositos"):
+                if save_dataframe_to_supabase(st.session_state.conn, "depositos", st.session_state.df):
                     st.session_state.data_imported = True
-                else:
-                    st.error("Error al guardar depósitos en Supabase.")
-            
+
             if not df_notas_debito_importado.empty:
                 st.session_state.notas = pd.concat([st.session_state.notas, df_notas_debito_importado], ignore_index=True)
-                if save_dataframe(st.session_state.notas, "notas_debito"):
+                if save_dataframe_to_supabase(st.session_state.conn, "notas_debito", st.session_state.notas):
                     st.session_state.data_imported = True
-                else:
-                    st.error("Error al guardar notas de débito en Supabase.")
-            
+
             if st.session_state.data_imported:
                 st.success("Datos importados y guardados en Supabase correctamente.")
-                recalculate_accumulated_balances()
-                st.rerun()
             else:
                 st.info("No se importaron datos válidos.")
 
     except Exception as e:
-        st.error(f"Error al cargar o procesar el archivo Excel: {e}")
+        st.error(f"Error al procesar el archivo Excel: {e}")
 
 def add_debit_note(fecha_nota, descuento, descuento_real):
     """Agrega una nueva nota de débito."""
@@ -586,7 +574,7 @@ def add_debit_note(fecha_nota, descuento, descuento_real):
         "Descuento real": float(descuento_real)
     }
     st.session_state.notas = pd.concat([st.session_state.notas, pd.DataFrame([nueva_nota])], ignore_index=True)
-    if save_dataframe(st.session_state.notas, "notas_debito"):
+    if save_dataframe_to_supabase(st.session_state.conn, "notas_debito", st.session_state.notas):
         st.session_state.debit_note_added = True
         st.success("Nota de débito agregada correctamente. Recalculando saldos...")
     else:
@@ -596,20 +584,20 @@ def delete_debit_note_record(index_to_delete):
     """Elimina una nota de débito."""
     try:
         st.session_state.notas = st.session_state.notas.drop(index=index_to_delete).reset_index(drop=True)
-        if save_dataframe(st.session_state.notas, "notas_debito"):
+        if save_dataframe_to_supabase(st.session_state.conn, "notas_debito", st.session_state.notas):
             st.session_state.debit_note_deleted = True
             st.success("Nota de débito eliminada correctamente. Recalculando saldos...")
         else:
             st.error("Error al eliminar la nota de débito.")
-    except Exception as e:
-        st.error(f"Error al eliminar la nota de débito: {e}")
+    except (IndexError, KeyError):
+        st.error("Índice de nota de débito no válido para eliminar.")
 
 def edit_debit_note_record(index_to_edit, updated_data):
     """Edita una nota de débito."""
     try:
         current_df = st.session_state.notas.copy()
         if index_to_edit not in current_df.index:
-            st.error("El índice de nota de débito no es válido.")
+            st.error("El índice de nota de débito a editar no es válido.")
             return
 
         for key, value in updated_data.items():
@@ -634,7 +622,7 @@ def edit_debit_note_record(index_to_edit, updated_data):
         current_df.loc[index_to_edit, "Descuento posible"] = libras_calculadas_recalc * descuento_actual
 
         st.session_state.notas = current_df
-        if save_dataframe(st.session_state.notas, "notas_debito"):
+        if save_dataframe_to_supabase(st.session_state.conn, "notas_debito", st.session_state.notas):
             st.session_state.debit_note_edited = True
             st.success("Nota de débito editada exitosamente. Recalculando saldos...")
         else:
@@ -642,15 +630,15 @@ def edit_debit_note_record(index_to_edit, updated_data):
     except Exception as e:
         st.error(f"Error al editar la nota de débito: {e}")
 
-# --- 5. FUNCIONES DE INTERFAZ DE USUARIO (UI) ---
+# --- 5. FUNCIONES DE INTERFAZ DE USUARIO ---
 def render_deposit_registration_form():
-    """Formulario de registro de depósitos."""
+    """Renderiza el formulario de registro de depósitos."""
     st.sidebar.header("📝 Registro de Depósitos")
     with st.sidebar.form("registro_deposito_form", clear_on_submit=True):
-        fecha_d = st.date_input("Fecha del registro", value=datetime.today().date())
-        empresa = st.selectbox("Empresa (Proveedor)", PROVEEDORES)
-        agencia = st.selectbox("Agencia", AGENCIAS)
-        monto = st.number_input("Monto ($)", min_value=0.0, format="%.2f")
+        fecha_d = st.date_input("Fecha del registro", value=datetime.today().date(), key="fecha_d_input_sidebar")
+        empresa = st.selectbox("Empresa (Proveedor)", PROVEEDORES, key="empresa_select_sidebar")
+        agencia = st.selectbox("Agencia", AGENCIAS, key="agencia_select_sidebar")
+        monto = st.number_input("Monto ($)", min_value=0.0, format="%.2f", key="monto_input_sidebar")
         submit_d = st.form_submit_button("➕ Agregar Depósito")
 
         if submit_d:
@@ -660,7 +648,7 @@ def render_deposit_registration_form():
                 add_deposit_record(fecha_d, empresa, agencia, monto)
 
 def render_delete_deposit_section():
-    """Sección para eliminar depósitos."""
+    """Renderiza la sección para eliminar depósitos."""
     st.sidebar.subheader("🗑️ Eliminar Depósito")
     if not st.session_state.df.empty:
         df_display_deposits = st.session_state.df.copy()
@@ -668,19 +656,26 @@ def render_delete_deposit_section():
             lambda row: f"{row.name} - {row['Fecha']} - {row['Empresa']} - ${row['Monto']:.2f}", axis=1
         )
         
-        deposito_seleccionado_info = st.sidebar.selectbox("Selecciona un depósito a eliminar", df_display_deposits["Display"])
+        deposito_seleccionado_info = st.sidebar.selectbox(
+            "Selecciona un depósito a eliminar", 
+            df_display_deposits["Display"], 
+            key="delete_deposit_select"
+        )
         index_to_delete = int(deposito_seleccionado_info.split(' - ')[0]) if deposito_seleccionado_info else None
 
-        if st.sidebar.button("🗑️ Eliminar depósito seleccionado"):
-            if index_to_delete is not None and st.sidebar.checkbox("✅ Confirmar eliminación"):
-                delete_deposit_record(index_to_delete)
+        if st.sidebar.button("🗑️ Eliminar depósito seleccionado", key="delete_deposit_button"):
+            if index_to_delete is not None:
+                if st.sidebar.checkbox("✅ Confirmar eliminación del depósito", key="confirm_delete_deposit_checkbox"):
+                    delete_deposit_record(index_to_delete)
+                else:
+                    st.warning("Por favor, marca la casilla para confirmar la eliminación.")
             else:
-                st.sidebar.warning("Marca la casilla para confirmar o selecciona un depósito.")
+                st.error("Por favor, selecciona un depósito válido para eliminar.")
     else:
         st.sidebar.info("No hay depósitos para eliminar.")
 
 def render_edit_deposit_section():
-    """Sección para editar depósitos."""
+    """Renderiza la sección para editar depósitos."""
     st.sidebar.subheader("✏️ Editar Depósito")
     if not st.session_state.df.empty:
         df_display_deposits = st.session_state.df.copy()
@@ -688,85 +683,97 @@ def render_edit_deposit_section():
             lambda row: f"{row.name} - {row['Fecha']} - {row['Empresa']} - ${row['Monto']:.2f}", axis=1
         )
         
-        deposito_seleccionado_info = st.sidebar.selectbox("Selecciona un depósito para editar", df_display_deposits["Display"])
+        deposito_seleccionado_info = st.sidebar.selectbox(
+            "Selecciona un depósito para editar",
+            df_display_deposits["Display"],
+            key="edit_deposit_select"
+        )
         index_to_edit = int(deposito_seleccionado_info.split(' - ')[0]) if deposito_seleccionado_info else None
 
         if index_to_edit is not None and index_to_edit in st.session_state.df.index:
             deposit_to_edit = st.session_state.df.loc[index_to_edit].to_dict()
-            with st.sidebar.form(f"edit_deposit_form_{index_to_edit}"):
-                edited_fecha = st.date_input("Fecha", value=deposit_to_edit["Fecha"])
-                edited_empresa = st.selectbox("Empresa", PROVEEDORES, index=PROVEEDORES.index(deposit_to_edit["Empresa"]))
-                edited_agencia = st.selectbox("Agencia", AGENCIAS, index=AGENCIAS.index(deposit_to_edit["Agencia"]))
-                edited_monto = st.number_input("Monto ($)", value=float(deposit_to_edit["Monto"]), min_value=0.0, format="%.2f")
-                submit_edit_deposit = st.form_submit_button("💾 Guardar Cambios")
+            with st.sidebar.form(f"edit_deposit_form_{index_to_edit}", clear_on_submit=False):
+                st.write(f"Editando depósito: **ID {index_to_edit}**")
+                default_empresa_idx = PROVEEDORES.index(deposit_to_edit["Empresa"]) if deposit_to_edit["Empresa"] in PROVEEDORES else 0
+                default_agencia_idx = AGENCIAS.index(deposit_to_edit["Agencia"]) if deposit_to_edit["Agencia"] in AGENCIAS else 0
 
-                if submit_edit_deposit and edited_monto > 0:
-                    updated_data = {
-                        "Fecha": edited_fecha,
-                        "Empresa": edited_empresa,
-                        "Agencia": edited_agencia,
-                        "Monto": edited_monto
-                    }
-                    edit_deposit_record(index_to_edit, updated_data)
-                elif submit_edit_deposit:
-                    st.error("El monto debe ser mayor que cero.")
+                edited_fecha = st.date_input("Fecha", value=deposit_to_edit["Fecha"], key=f"edit_fecha_d_{index_to_edit}")
+                edited_empresa = st.selectbox("Empresa (Proveedor)", PROVEEDORES, index=default_empresa_idx, key=f"edit_empresa_{index_to_edit}")
+                edited_agencia = st.selectbox("Agencia", AGENCIAS, index=default_agencia_idx, key=f"edit_agencia_{index_to_edit}")
+                edited_monto = st.number_input("Monto ($)", value=float(deposit_to_edit["Monto"]), min_value=0.0, format="%.2f", key=f"edit_monto_{index_to_edit}")
+                
+                submit_edit_deposit = st.form_submit_button("💾 Guardar Cambios del Depósito")
+                if submit_edit_deposit:
+                    if edited_monto <= 0:
+                        st.error("El monto del depósito debe ser mayor que cero.")
+                    else:
+                        updated_data = {
+                            "Fecha": edited_fecha,
+                            "Empresa": edited_empresa,
+                            "Agencia": edited_agencia,
+                            "Monto": edited_monto
+                        }
+                        edit_deposit_record(index_to_edit, updated_data)
+        else:
+            st.sidebar.info("Selecciona un depósito para ver sus detalles de edición.")
     else:
         st.sidebar.info("No hay depósitos para editar.")
 
 def render_import_excel_section():
-    """Sección para importar datos desde Excel."""
+    """Renderiza la sección para importar datos desde Excel."""
     st.subheader("📁 Importar datos desde Excel")
     st.info("Asegúrate de que tu archivo Excel tenga las siguientes hojas y columnas:")
     st.markdown("- **Hoja 1 (registro de proveedores):** `Fecha`, `Proveedor`, `Cantidad`, `Peso Salida (kg)`, `Peso Entrada (kg)`, `Tipo Documento`, `Cantidad de gavetas`, `Precio Unitario ($)`")
     st.markdown("- **Hoja 2 (registro de depositos):** `Fecha`, `Empresa`, `Agencia`, `Monto`")
     st.markdown("- **Hoja 3 (registro de notas de debito):** `Fecha`, `Descuento`, `Descuento real`")
     
-    archivo_excel = st.file_uploader("Sube tu archivo Excel (.xlsx)", type=["xlsx"])
+    archivo_excel = st.file_uploader("Sube tu archivo Excel (.xlsx)", type=["xlsx"], key="excel_uploader")
     if archivo_excel is not None:
         import_excel_data(archivo_excel)
 
 def render_supplier_registration_form():
-    """Formulario de registro de proveedores."""
+    """Renderiza el formulario de registro de proveedores."""
     st.subheader("➕ Registro de Proveedores")
     with st.form("formulario_registro_proveedor", clear_on_submit=True):
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            fecha = st.date_input("Fecha", value=datetime.today().date())
-            proveedor = st.selectbox("Proveedor", PROVEEDORES)
+            fecha = st.date_input("Fecha", value=datetime.today().date(), key="fecha_input_form")
+            proveedor = st.selectbox("Proveedor", PROVEEDORES, key="proveedor_select_form")
         with col2:
-            cantidad = st.number_input("Cantidad", min_value=0, step=1)
-            peso_salida = st.number_input("Peso Salida (kg)", min_value=0.0, step=0.1, format="%.2f")
+            cantidad = st.number_input("Cantidad", min_value=0, step=1, key="cantidad_input_form")
+            peso_salida = st.number_input("Peso Salida (kg)", min_value=0.0, step=0.1, format="%.2f", key="peso_salida_input_form")
         with col3:
-            peso_entrada = st.number_input("Peso Entrada (kg)", min_value=0.0, step=0.1, format="%.2f")
-            documento = st.selectbox("Tipo Documento", TIPOS_DOCUMENTO)
+            peso_entrada = st.number_input("Peso Entrada (kg)", min_value=0.0, step=0.1, format="%.2f", key="peso_entrada_input_form")
+            documento = st.selectbox("Tipo Documento", TIPOS_DOCUMENTO, key="documento_select_form")
         with col4:
-            gavetas = st.number_input("Cantidad de gavetas", min_value=0, step=1)
-            precio_unitario = st.number_input("Precio Unitario ($)", min_value=0.0, step=0.01, format="%.2f")
+            gavetas = st.number_input("Cantidad de gavetas", min_value=0, step=1, key="gavetas_input_form")
+            precio_unitario = st.number_input("Precio Unitario ($)", min_value=0.0, step=0.01, format="%.2f", key="precio_unitario_input_form")
 
         enviar = st.form_submit_button("➕ Agregar Registro")
         if enviar:
             add_supplier_record(fecha, proveedor, cantidad, peso_salida, peso_entrada, documento, gavetas, precio_unitario)
 
 def render_debit_note_form():
-    """Formulario para notas de débito."""
+    """Renderiza el formulario para notas de débito."""
     st.subheader("📝 Registro de Nota de Débito")
     with st.form("nota_debito_form", clear_on_submit=True):
         col1, col2, col3 = st.columns(3)
         with col1:
-            fecha_nota = st.date_input("Fecha de Nota", value=datetime.today().date())
+            fecha_nota = st.date_input("Fecha de Nota", value=datetime.today().date(), key="fecha_nota_input_form")
         with col2:
-            descuento = st.number_input("Descuento (%)", min_value=0.0, max_value=1.0, step=0.01, format="%.2f", value=0.0)
+            descuento = st.number_input("Descuento (%) (ej. 0.05 para 5%)", min_value=0.0, max_value=1.0, step=0.01, format="%.2f", value=0.0, key="descuento_input_form")
         with col3:
-            descuento_real = st.number_input("Descuento Real ($)", min_value=0.0, step=0.01, format="%.2f", value=0.0)
+            descuento_real = st.number_input("Descuento Real ($)", min_value=0.0, step=0.01, format="%.2f", value=0.0, key="descuento_real_input_form")
         
         agregar_nota = st.form_submit_button("➕ Agregar Nota de Débito")
-        if agregar_nota and (descuento_real > 0 or descuento > 0):
-            add_debit_note(fecha_nota, descuento, descuento_real)
-        elif agregar_nota:
-            st.error("Ingresa un Descuento (%) o Descuento Real ($) mayor que cero.")
+        if agregar_nota:
+            if descuento_real <= 0 and descuento <= 0:
+                st.error("Ingresa un valor para Descuento (%) o Descuento Real ($) mayor que cero.")
+            else:
+                add_debit_note(fecha_nota, descuento, descuento_real)
 
 def render_delete_debit_note_section():
-    """Sección para eliminar notas de débito."""
+    """Renderiza la sección para eliminar notas de débito."""
     st.subheader("🗑️ Eliminar Nota de Débito")
     if not st.session_state.notas.empty:
         df_display_notes = st.session_state.notas.copy()
@@ -774,19 +781,26 @@ def render_delete_debit_note_section():
             lambda row: f"{row.name} - {row['Fecha']} - Descuento real: ${row['Descuento real']:.2f}", axis=1
         )
         
-        nota_seleccionada_info = st.selectbox("Selecciona una nota de débito para eliminar", df_display_notes["Display"])
+        nota_seleccionada_info = st.selectbox(
+            "Selecciona una nota de débito para eliminar", 
+            df_display_notes["Display"], 
+            key="delete_debit_note_select"
+        )
         index_to_delete = int(nota_seleccionada_info.split(' - ')[0]) if nota_seleccionada_info else None
         
-        if st.button("🗑️ Eliminar Nota de Débito seleccionada"):
-            if index_to_delete is not None and st.checkbox("✅ Confirmar eliminación"):
-                delete_debit_note_record(index_to_delete)
+        if st.button("🗑️ Eliminar Nota de Débito seleccionada", key="delete_debit_note_button"):
+            if index_to_delete is not None:
+                if st.checkbox("✅ Confirmar eliminación de la nota de débito", key="confirm_delete_debit_note"):
+                    delete_debit_note_record(index_to_delete)
+                else:
+                    st.warning("Por favor, marca la casilla para confirmar la eliminación.")
             else:
-                st.warning("Marca la casilla para confirmar o selecciona una nota.")
+                st.error("Por favor, selecciona una nota de débito válida para eliminar.")
     else:
         st.info("No hay notas de débito para eliminar.")
 
 def render_edit_debit_note_section():
-    """Sección para editar notas de débito."""
+    """Renderiza la sección para editar notas de débito."""
     st.subheader("✏️ Editar Nota de Débito")
     if not st.session_state.notas.empty:
         df_display_notes = st.session_state.notas.copy()
@@ -794,31 +808,39 @@ def render_edit_debit_note_section():
             lambda row: f"{row.name} - {row['Fecha']} - Descuento real: ${row['Descuento real']:.2f}", axis=1
         )
         
-        nota_seleccionada_info = st.selectbox("Selecciona una nota de débito para editar", df_display_notes["Display"])
+        nota_seleccionada_info = st.selectbox(
+            "Selecciona una nota de débito para editar",
+            df_display_notes["Display"],
+            key="edit_debit_note_select"
+        )
         index_to_edit = int(nota_seleccionada_info.split(' - ')[0]) if nota_seleccionada_info else None
 
         if index_to_edit is not None and index_to_edit in st.session_state.notas.index:
             note_to_edit = st.session_state.notas.loc[index_to_edit].to_dict()
-            with st.form(f"edit_debit_note_form_{index_to_edit}"):
-                edited_fecha_nota = st.date_input("Fecha de Nota", value=note_to_edit["Fecha"])
-                edited_descuento = st.number_input("Descuento (%)", value=float(note_to_edit["Descuento"]), min_value=0.0, max_value=1.0, step=0.01, format="%.2f")
-                edited_descuento_real = st.number_input("Descuento Real ($)", value=float(note_to_edit["Descuento real"]), min_value=0.0, step=0.01, format="%.2f")
+            with st.form(f"edit_debit_note_form_{index_to_edit}", clear_on_submit=False):
+                st.write(f"Editando nota de débito: **ID {index_to_edit}**")
+                edited_fecha_nota = st.date_input("Fecha de Nota", value=note_to_edit["Fecha"], key=f"edit_fecha_nota_{index_to_edit}")
+                edited_descuento = st.number_input("Descuento (%)", value=float(note_to_edit["Descuento"]), min_value=0.0, max_value=1.0, step=0.01, format="%.2f", key=f"edit_descuento_{index_to_edit}")
+                edited_descuento_real = st.number_input("Descuento Real ($)", value=float(note_to_edit["Descuento real"]), min_value=0.0, step=0.01, format="%.2f", key=f"edit_descuento_real_{index_to_edit}")
                 
-                submit_edit_note = st.form_submit_button("💾 Guardar Cambios")
-                if submit_edit_note and (edited_descuento > 0 or edited_descuento_real > 0):
-                    updated_data = {
-                        "Fecha": edited_fecha_nota,
-                        "Descuento": edited_descuento,
-                        "Descuento real": edited_descuento_real
-                    }
-                    edit_debit_note_record(index_to_edit, updated_data)
-                elif submit_edit_note:
-                    st.error("Ingresa un Descuento (%) o Descuento Real ($) mayor que cero.")
+                submit_edit_note = st.form_submit_button("💾 Guardar Cambios de Nota de Débito")
+                if submit_edit_note:
+                    if edited_descuento_real <= 0 and edited_descuento <= 0:
+                        st.error("Ingresa un valor para Descuento (%) o Descuento Real ($) mayor que cero.")
+                    else:
+                        updated_data = {
+                            "Fecha": edited_fecha_nota,
+                            "Descuento": edited_descuento,
+                            "Descuento real": edited_descuento_real
+                        }
+                        edit_debit_note_record(index_to_edit, updated_data)
+        else:
+            st.info("Selecciona una nota de débito para ver sus detalles de edición.")
     else:
         st.info("No hay notas de débito para editar.")
 
 def display_formatted_dataframe(df_source, title, columns_to_format=None, key_suffix="", editable_cols=None):
-    """Muestra un DataFrame con formato de moneda y edición."""
+    """Muestra un DataFrame con formato y edición."""
     st.subheader(title)
     df_display = df_source.copy()
 
@@ -852,61 +874,71 @@ def display_formatted_dataframe(df_source, title, columns_to_format=None, key_su
     edited_df = st.dataframe(
         df_display, 
         use_container_width=True, 
+        key=f"editable_df_{key_suffix}", 
         hide_index=False,
-        column_config=column_config,
-        key=f"editable_df_{key_suffix}"
+        column_config=column_config
     )
 
     if f"editable_df_{key_suffix}" in st.session_state and st.session_state[f"editable_df_{key_suffix}"]["edited_rows"]:
-        st.info("Se han detectado cambios. Presiona 'Guardar Cambios'.")
-        if st.button(f"💾 Guardar Cambios en {title}"):
-            df_updated_rows = st.session_state[f"editable_df_{key_suffix}"]["edited_rows"]
-            original_df_to_update = df_source.copy()
+        st.info("¡Se han detectado cambios en la tabla! Presiona 'Guardar Cambios' para aplicar.")
+        if st.button(f"💾 Guardar Cambios en {title}", key=f"save_changes_{key_suffix}"):
+            try:
+                df_updated_rows = st.session_state[f"editable_df_{key_suffix}"]["edited_rows"]
+                original_df_to_update = df_source.copy()
 
-            for idx_str, changes in df_updated_rows.items():
-                idx = int(idx_str)
-                if title == "Tabla de Registros" and original_df_to_update.loc[idx, "Proveedor"] == "BALANCE_INICIAL":
-                    st.warning(f"No se pueden editar las propiedades de BALANCE_INICIAL (ID: {idx}).")
-                    continue
+                for idx_str, changes in df_updated_rows.items():
+                    idx = int(idx_str)
+                    if title == "Tabla de Registros" and original_df_to_update.loc[idx, "Proveedor"] == "BALANCE_INICIAL":
+                        st.warning(f"No se pueden editar las propiedades de la fila de BALANCE_INICIAL (ID: {idx}).")
+                        continue
 
-                for col, value in changes.items():
-                    original_type = df_source[col].dtype
-                    if pd.api.types.is_datetime64_any_dtype(original_type) or isinstance(df_source.loc[idx, col], date):
-                        try:
-                            original_df_to_update.loc[idx, col] = pd.to_datetime(value).date()
-                        except:
-                            st.warning(f"Formato de fecha inválido en {col}, fila {idx}.")
-                            original_df_to_update.loc[idx, col] = df_source.loc[idx, col]
-                    elif pd.api.types.is_numeric_dtype(original_type):
-                        try:
-                            if editable_cols and editable_cols.get(col) == "number_int":
-                                original_df_to_update.loc[idx, col] = int(value)
-                            else:
-                                original_df_to_update.loc[idx, col] = float(value)
-                        except:
-                            st.warning(f"Valor numérico inválido en {col}, fila {idx}.")
-                            original_df_to_update.loc[idx, col] = df_source.loc[idx, col]
-                    else:
-                        original_df_to_update.loc[idx, col] = value
+                    for col, value in changes.items():
+                        original_type = df_source[col].dtype
+                        if pd.api.types.is_datetime64_any_dtype(original_type) or isinstance(df_source.loc[idx, col], (date, datetime)):
+                            try:
+                                original_df_to_update.loc[idx, col] = pd.to_datetime(value).date()
+                            except (ValueError, TypeError):
+                                st.warning(f"Formato de fecha inválido para la columna '{col}' en la fila {idx}.")
+                                original_df_to_update.loc[idx, col] = df_source.loc[idx, col]
+                        elif pd.api.types.is_numeric_dtype(original_type):
+                            try:
+                                if editable_cols and editable_cols.get(col) == "number_int":
+                                    original_df_to_update.loc[idx, col] = int(value)
+                                else:
+                                    original_df_to_update.loc[idx, col] = float(value)
+                            except (ValueError, TypeError):
+                                st.warning(f"Valor numérico inválido para la columna '{col}' en la fila {idx}.")
+                                original_df_to_update.loc[idx, col] = df_source.loc[idx, col]
+                        else:
+                            original_df_to_update.loc[idx, col] = value
                 
-            if title == "Tabla de Registros":
-                st.session_state.data = original_df_to_update
-                if save_dataframe(st.session_state.data, "proveedores"):
-                    st.session_state.record_edited = True
-                    st.success("Cambios guardados. Recalculando saldos...")
-            elif title == "Depósitos Registrados":
-                st.session_state.df = original_df_to_update
-                if save_dataframe(st.session_state.df, "depositos"):
-                    st.session_state.deposit_edited = True
-                    st.success("Cambios guardados. Recalculando saldos...")
-            elif title == "Tabla de Notas de Débito":
-                st.session_state.notas = original_df_to_update
-                if save_dataframe(st.session_state.notas, "notas_debito"):
-                    st.session_state.debit_note_edited = True
-                    st.success("Cambios guardados. Recalculando saldos...")
+                if title == "Tabla de Registros":
+                    st.session_state.data = original_df_to_update
+                    if save_dataframe_to_supabase(st.session_state.conn, "proveedores", st.session_state.data):
+                        st.session_state.record_edited = True
+                        st.success(f"Cambios en {title} guardados exitosamente.")
+                    else:
+                        st.error(f"Error al guardar los cambios en {title}.")
+                elif title == "Depósitos Registrados":
+                    st.session_state.df = original_df_to_update
+                    if save_dataframe_to_supabase(st.session_state.conn, "depositos", st.session_state.df):
+                        st.session_state.deposit_edited = True
+                        st.success(f"Cambios en {title} guardados exitosamente.")
+                    else:
+                        st.error(f"Error al guardar los cambios en {title}.")
+                elif title == "Tabla de Notas de Débito":
+                    st.session_state.notas = original_df_to_update
+                    if save_dataframe_to_supabase(st.session_state.conn, "notas_debito", st.session_state.notas):
+                        st.session_state.debit_note_edited = True
+                        st.success(f"Cambios en {title} guardados exitosamente.")
+                    else:
+                        st.error(f"Error al guardar los cambios en {title}.")
+                
+            except Exception as e:
+                st.error(f"Error al procesar los cambios: {e}")
 
 def render_tables_and_download():
-    """Renderiza las tablas y opción de descarga."""
+    """Renderiza las tablas y la opción de descarga."""
     df_display_data = st.session_state.data[st.session_state.data["Proveedor"] != "BALANCE_INICIAL"].copy()
     
     editable_cols_data = {
@@ -936,17 +968,24 @@ def render_tables_and_download():
                 lambda row: f"{row.name} - {row['Fecha']} - {row['Proveedor']} - ${row['Total ($)']:.2f}" if pd.notna(row["Total ($)"]) else f"{row.name} - {row['Fecha']} - {row['Proveedor']} - Sin total",
                 axis=1
             )
-            registro_seleccionado_info = st.selectbox("Selecciona un registro para eliminar", df_display_data_for_del["Display"])
+            registro_seleccionado_info = st.selectbox(
+                "Selecciona un registro para eliminar", df_display_data_for_del["Display"], key="delete_record_select"
+            )
             index_to_delete_record = int(registro_seleccionado_info.split(' - ')[0]) if registro_seleccionado_info else None
 
-            if st.button("🗑️ Eliminar Registro Seleccionado"):
-                if index_to_delete_record is not None and st.checkbox("✅ Confirmar eliminación"):
-                    delete_record(index_to_delete_record)
+            if st.button("🗑️ Eliminar Registro Seleccionado", key="delete_record_button"):
+                if index_to_delete_record is not None:
+                    if st.checkbox("✅ Confirmar eliminación del registro", key="confirm_delete_record"):
+                        delete_record(index_to_delete_record)
+                    else:
+                        st.warning("Por favor, marca la casilla para confirmar la eliminación.")
                 else:
-                    st.warning("Marca la casilla para confirmar o selecciona un registro.")
+                    st.error("Por favor, selecciona un registro válido para eliminar.")
+        else:
+            st.info("No hay registros disponibles para eliminar.")
     else:
         st.subheader("Tabla de Registros")
-        st.info("No hay registros. Agrega algunos o importa desde Excel.")
+        st.info("No hay registros disponibles. Agrega algunos o importa desde Excel.")
 
     st.markdown("---")
     editable_cols_notes = {
@@ -994,12 +1033,6 @@ def render_tables_and_download():
         output = BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             df_data_export = df_data[df_data["Proveedor"] != "BALANCE_INICIAL"].copy()
-            if "Display" in df_data_export.columns:
-                df_data_export = df_data_export.drop(columns=["Display"])
-            if "Display" in df_deposits.columns:
-                df_deposits = df_deposits.drop(columns=["Display"])
-            if "Display" in df_notes.columns:
-                df_notes = df_notes.drop(columns=["Display"])
             df_data_export.to_excel(writer, sheet_name="registro de proveedores", index=False)
             df_deposits.to_excel(writer, sheet_name="registro de depositos", index=False)
             df_notes.to_excel(writer, sheet_name="registro de notas de debito", index=False)
@@ -1024,7 +1057,7 @@ def get_image_as_base64(fig):
     return img_base64
 
 def generate_pdf_report(title, content_elements, filename="reporte.pdf"):
-    """Genera un PDF con el contenido dado."""
+    """Genera un PDF con el título y elementos dados."""
     doc = SimpleDocTemplate(filename, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
@@ -1044,20 +1077,18 @@ def generate_pdf_report(title, content_elements, filename="reporte.pdf"):
             label=f"🖨️ Imprimir {title} (PDF)",
             data=pdf_bytes,
             file_name=filename,
-            mime="application/pdf"
+            mime="application/pdf",
+            key=f"print_button_{filename.replace('.', '_')}"
         )
     except Exception as e:
         st.error(f"Error al generar el PDF: {e}")
 
 def create_table_for_pdf(df, title, columns_to_format=None):
-    """Crea una tabla para ReportLab."""
+    """Crea una tabla de ReportLab desde un DataFrame."""
     if df.empty:
         return Paragraph(f"No hay datos para '{title}'.", getSampleStyleSheet()['Normal'])
 
     df_pdf = df.copy()
-    if "Display" in df_pdf.columns:
-        df_pdf = df_pdf.drop(columns=["Display"])
-
     if columns_to_format:
         for col in columns_to_format:
             if col in df_pdf.columns:
@@ -1084,7 +1115,7 @@ def create_table_for_pdf(df, title, columns_to_format=None):
     return table
 
 def render_weekly_report():
-    """Reporte semanal."""
+    """Renderiza el reporte semanal."""
     st.header("📈 Reporte Semanal")
     df = st.session_state.data.copy()
     df = df[df["Proveedor"] != "BALANCE_INICIAL"].copy()
@@ -1093,6 +1124,7 @@ def render_weekly_report():
     if not df.empty:
         df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce")
         df.dropna(subset=["Fecha"], inplace=True)
+        
         if not df.empty:
             df["YearWeek"] = df["Fecha"].dt.strftime('%Y-%U')
             semana_actual = df["YearWeek"].max()
@@ -1117,17 +1149,17 @@ def render_weekly_report():
                 st.info(f"No hay datos para la semana actual ({semana_actual}).")
                 content_elements.append(Paragraph(f"No hay datos para la semana actual ({semana_actual}).", getSampleStyleSheet()['Normal']))
         else:
-            st.info("No hay datos con fecha válida.")
-            content_elements.append(Paragraph("No hay datos con fecha válida.", getSampleStyleSheet()['Normal']))
+            st.info("No hay datos con fecha válida para el reporte semanal.")
+            content_elements.append(Paragraph("No hay datos con fecha válida para el reporte semanal.", getSampleStyleSheet()['Normal']))
     else:
         st.info("No hay datos para el reporte semanal.")
         content_elements.append(Paragraph("No hay datos para el reporte semanal.", getSampleStyleSheet()['Normal']))
 
-    if st.button("🖨️ Imprimir Reporte Semanal"):
+    if st.button("🖨️ Imprimir Reporte Semanal", key="print_weekly_report"):
         generate_pdf_report("Reporte Semanal de Proveedores", content_elements, "reporte_semanal.pdf")
 
 def render_monthly_report():
-    """Reporte mensual."""
+    """Renderiza el reporte mensual."""
     st.header("📊 Reporte Mensual")
     df = st.session_state.data.copy()
     df = df[df["Proveedor"] != "BALANCE_INICIAL"].copy()
@@ -1162,11 +1194,11 @@ def render_monthly_report():
         st.info("No hay datos para el reporte mensual.")
         content_elements.append(Paragraph("No hay datos para el reporte mensual.", getSampleStyleSheet()['Normal']))
     
-    if st.button("🖨️ Imprimir Reporte Mensual"):
+    if st.button("🖨️ Imprimir Reporte Mensual", key="print_monthly_report"):
         generate_pdf_report("Reporte Mensual de Proveedores", content_elements, "reporte_mensual.pdf")
 
 def render_charts():
-    """Gráficos de datos."""
+    """Renderiza los gráficos de datos."""
     st.header("📊 Gráficos de Proveedores y Saldo")
     df = st.session_state.data.copy()
     df = df[df["Proveedor"] != "BALANCE_INICIAL"].copy()
@@ -1195,69 +1227,13 @@ def render_charts():
         content_elements.append(Paragraph("<b>Total por Proveedor</b>", getSampleStyleSheet()['h2']))
         content_elements.append(RImage(BytesIO(base64.b64decode(get_image_as_base64(fig_proveedores))), width=5*inch, height=3*inch))
     else:
-        st.info("No hay datos de 'Total ($)' por proveedor.")
-        content_elements.append(Paragraph("No hay datos de 'Total ($)' por proveedor.", getSampleStyleSheet()['Normal']))
+        st.info("No hay datos de 'Total ($)' por proveedor para graficar.")
+        content_elements.append(Paragraph("No hay datos de 'Total ($)' por proveedor para graficar.", getSampleStyleSheet()['Normal']))
     
     st.subheader("Evolución del Saldo Acumulado")
     df_ordenado = df.sort_values("Fecha")
     df_ordenado["Saldo Acumulado"] = pd.to_numeric(df_ordenado["Saldo Acumulado"], errors='coerce').fillna(INITIAL_ACCUMULATED_BALANCE)
     df_ordenado = df_ordenado[df_ordenado['Fecha'].notna()]
-    
+
     if not df_ordenado.empty:
-        daily_last_saldo = df_ordenado.groupby("Fecha")["Saldo Acumulado"].last().reset_index()
-        fig_saldo, ax2 = plt.subplots(figsize=(12, 6))
-        ax2.plot(daily_last_saldo["Fecha"], daily_last_saldo["Saldo Acumulado"], marker="o", linestyle='-', color='green')
-        ax2.set_ylabel("Saldo Acumulado ($)")
-        ax2.set_title("Evolución del Saldo Acumulado")
-        ax2.grid(True, linestyle='--', alpha=0.7)
-        ax2.ticklabel_format(style='plain', axis='y')
-        plt.xticks(rotation=45, ha='right')
-        formatter = mticker.FormatStrFormatter('$%.2f')
-        ax2.yaxis.set_major_formatter(formatter)
-        plt.tight_layout()
-        st.pyplot(fig_saldo)
-        content_elements.append(Paragraph("<b>Evolución del Saldo Acumulado</b>", getSampleStyleSheet()['h2']))
-        content_elements.append(RImage(BytesIO(base64.b64decode(get_image_as_base64(fig_saldo))), width=6*inch, height=3*inch))
-    else:
-        st.info("No hay datos de 'Saldo Acumulado'.")
-        content_elements.append(Paragraph("No hay datos de 'Saldo Acumulado'.", getSampleStyleSheet()['Normal']))
-
-    if st.button("🖨️ Imprimir Gráficos (PDF)"):
-        generate_pdf_report("Gráficos de Proveedores y Saldo", content_elements, "graficos_proveedores.pdf")
-
-# --- CONFIGURACIÓN PRINCIPAL ---
-st.title("Sistema de Gestión de Proveedores - Producto Pollo")
-initialize_session_state()
-
-st.sidebar.title("Menú Principal")
-opcion = st.sidebar.selectbox("Selecciona una vista", ["Registro", "Reporte Semanal", "Reporte Mensual", "Gráficos"])
-
-if opcion == "Registro":
-    st.sidebar.markdown("---")
-    render_deposit_registration_form()
-    render_delete_deposit_section()
-    render_edit_deposit_section()
-    st.sidebar.markdown("---")
-    render_import_excel_section()
-    st.markdown("---")
-    render_supplier_registration_form()
-    st.markdown("---")
-    render_debit_note_form()
-    st.markdown("---")
-    render_tables_and_download()
-elif opcion == "Reporte Semanal":
-    render_weekly_report()
-elif opcion == "Reporte Mensual":
-    render_monthly_report()
-elif opcion == "Gráficos":
-    render_charts()
-
-if any(st.session_state[flag] for flag in ["deposit_added", "deposit_deleted", "record_added", "record_deleted", 
-                                           "data_imported", "debit_note_added", "debit_note_deleted", 
-                                           "record_edited", "deposit_edited", "debit_note_edited"]):
-    for flag in ["deposit_added", "deposit_deleted", "record_added", "record_deleted", 
-                 "data_imported", "debit_note_added", "debit_note_deleted", 
-                 "record_edited", "deposit_edited", "debit_note_edited"]:
-        st.session_state[flag] = False
-    recalculate_accumulated_balances()
-    st.rerun()
+        daily_last_saldo = df_orden
