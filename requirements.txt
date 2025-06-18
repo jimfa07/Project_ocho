@@ -5,3 +5,4 @@ fpdf
 matplotlib
 reportlab
 superbase
+st-supabase-connection
